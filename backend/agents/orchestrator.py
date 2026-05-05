@@ -76,6 +76,26 @@ async def _update_task_status(task_id: int, status: str, error: str = None):
             await session.commit()
 
 
+async def _check_cancel_requested(task_id: int) -> bool:
+    """Check if task cancellation has been requested."""
+    async with async_session() as session:
+        from sqlalchemy import select
+        obj = await session.execute(select(Task).where(Task.id == task_id))
+        task = obj.scalar_one_or_none()
+        return task and bool(task.cancel_requested)
+
+
+async def _set_cancel_requested(task_id: int, value: bool = True):
+    """Set task cancellation flag."""
+    async with async_session() as session:
+        from sqlalchemy import select
+        obj = await session.execute(select(Task).where(Task.id == task_id))
+        task = obj.scalar_one_or_none()
+        if task:
+            task.cancel_requested = 1 if value else 0
+            await session.commit()
+
+
 # ── Nodes ──
 
 async def parse_code_node(state: AgentState) -> AgentState:
@@ -131,6 +151,14 @@ async def parse_code_node(state: AgentState) -> AgentState:
             task_id, "code_parser", "agent_progress",
             message="Scanning project directory..."
         )
+
+        # Check for cancellation before starting
+        if await _check_cancel_requested(task_id):
+            await _finish_agent_run(run_id, error="Task cancelled")
+            await ws_manager.send_agent_event(task_id, "code_parser", "agent_failed", error="Task cancelled")
+            state["error"] = "Task cancelled"
+            state["status"] = "cancelled"
+            return state
 
         result = await parse_project(project_path, llm_client)
 
@@ -206,6 +234,14 @@ async def run_load_test_node(state: AgentState) -> AgentState:
             task_id, "load_tester", "agent_progress",
             message=f"Testing {len(endpoints)} endpoints at {target_url}..."
         )
+
+        # Check for cancellation before starting
+        if await _check_cancel_requested(task_id):
+            await _finish_agent_run(run_id, error="Task cancelled")
+            await ws_manager.send_agent_event(task_id, "load_tester", "agent_failed", error="Task cancelled")
+            state["error"] = "Task cancelled"
+            state["status"] = "cancelled"
+            return state
 
         result = await run_load_test(
             endpoints=endpoints,
@@ -343,15 +379,23 @@ async def run_orchestrator(task_id: int):
         # Step 1: Parse code
         state = await parse_code_node(state)
         if state.get("error"):
-            await _update_task_status(task_id, "failed", state["error"])
-            await ws_manager.send_task_done(task_id, "failed")
+            if state.get("status") == "cancelled":
+                await _update_task_status(task_id, "cancelled", "Task cancelled by user")
+                await ws_manager.send_task_done(task_id, "cancelled")
+            else:
+                await _update_task_status(task_id, "failed", state["error"])
+                await ws_manager.send_task_done(task_id, "failed")
             return
 
         # Step 2: Run load test
         state = await run_load_test_node(state)
         if state.get("error"):
-            await _update_task_status(task_id, "failed", state["error"])
-            await ws_manager.send_task_done(task_id, "failed")
+            if state.get("status") == "cancelled":
+                await _update_task_status(task_id, "cancelled", "Task cancelled by user")
+                await ws_manager.send_task_done(task_id, "cancelled")
+            else:
+                await _update_task_status(task_id, "failed", state["error"])
+                await ws_manager.send_task_done(task_id, "failed")
             return
 
         # Step 3: Build report and fix document

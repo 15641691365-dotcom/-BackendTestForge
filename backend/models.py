@@ -26,6 +26,7 @@ class Task(Base):
     feature_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="pending")
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=func.now(), onupdate=func.now()

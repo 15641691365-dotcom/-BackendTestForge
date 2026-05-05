@@ -7,11 +7,10 @@ K6Runner — k6 压测脚本生成、执行、结果解析。
 3. 写入临时文件 → 执行 k6 → 解析 JSON 输出
 """
 
+import asyncio
 import json
 import logging
 import os
-import subprocess
-import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -139,19 +138,30 @@ class K6Runner:
 
         try:
             start = time.time()
-            result = subprocess.run(
-                cmd,
+            # 使用异步方式执行 k6，避免阻塞事件循环
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
                 env=env,
-                capture_output=True,
-                text=True,
-                timeout=duration + 30,  # Allow some overhead
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 cwd=workdir,
             )
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=duration + 30,  # Allow some overhead
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                raise asyncio.TimeoutError("k6 process timed out")
+
             elapsed = time.time() - start
 
             # k6 outputs results to stderr; combine both for parsing
-            combined_output = result.stderr + "\n" + result.stdout
-            logger.info(f"k6 step completed in {elapsed:.1f}s (exit: {result.returncode})")
+            combined_output = stderr.decode("utf-8", errors="replace") + "\n" + stdout.decode("utf-8", errors="replace")
+            logger.info(f"k6 step completed in {elapsed:.1f}s (exit: {process.returncode})")
 
             # Try to parse summary export
             summary_path = script_path.replace(".js", "_summary.json")
@@ -162,7 +172,7 @@ class K6Runner:
 
             return parsed
 
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
             logger.warning(f"k6 step timed out ({vus} VUs, {duration}s)")
             return {
                 "vus": vus,

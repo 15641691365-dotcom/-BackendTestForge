@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -42,6 +43,23 @@ class TaskResponse(BaseModel):
 @router.post("", response_model=TaskResponse)
 async def create_task(req: TaskCreateRequest):
     """Create a new test task."""
+    # Validate project path
+    if not req.project_path:
+        raise HTTPException(status_code=400, detail="项目路径不能为空")
+    
+    if not os.path.isdir(req.project_path):
+        raise HTTPException(
+            status_code=400, 
+            detail=f"项目路径不存在或不是目录: {req.project_path}"
+        )
+    
+    # Validate startup config if in direct mode
+    if req.startup_mode == "direct" and not req.startup_config:
+        raise HTTPException(
+            status_code=400, 
+            detail="direct 模式下必须提供目标 URL (startup_config)"
+        )
+    
     async with async_session() as session:
         task = Task(
             name=req.name,
@@ -50,6 +68,7 @@ async def create_task(req: TaskCreateRequest):
             startup_config=req.startup_config,
             feature_name=req.feature_name or None,
             status="pending",
+            cancel_requested=0,
         )
         session.add(task)
         await session.commit()
@@ -91,8 +110,41 @@ async def run_task(task_id: int):
     """Trigger task execution. Returns immediately; task runs async."""
     from backend.agents.orchestrator import run_orchestrator
     import asyncio
+    
+    async with async_session() as session:
+        from sqlalchemy import select
+        result = await session.execute(select(Task).where(Task.id == task_id))
+        task = result.scalar_one_or_none()
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        if task.status not in ["pending", "completed", "failed", "cancelled"]:
+            raise HTTPException(status_code=400, detail="Task is already running")
+    
     asyncio.create_task(run_orchestrator(task_id))
     return {"message": "Task started", "task_id": task_id}
+
+
+@router.post("/{task_id}/cancel")
+async def cancel_task(task_id: int):
+    """Request cancellation of a running task."""
+    from backend.agents.orchestrator import _set_cancel_requested
+    
+    async with async_session() as session:
+        from sqlalchemy import select
+        result = await session.execute(select(Task).where(Task.id == task_id))
+        task = result.scalar_one_or_none()
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        if task.status != "running":
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Cannot cancel task with status: {task.status}"
+            )
+    
+    await _set_cancel_requested(task_id, True)
+    return {"message": "Task cancellation requested", "task_id": task_id}
 
 
 @router.get("/{task_id}/load-results")
