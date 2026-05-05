@@ -1,0 +1,8 @@
+fastapi[standard]
+uvicorn[standard]
+sqlalchemy
+aiosqlite
+langgraph
+httpx
+websockets
+pydantic
